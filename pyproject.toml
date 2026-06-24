@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "agent-mesh"
+version = "0.1.0"
+description = "Inter-agent messaging multiplexer via Redis Streams + MCP server"
+requires-python = ">=3.11"
+dependencies = [
+    "redis>=5.0",
+    "click>=8.0",
+    "mcp>=1.0",
+    "starlette",
+    "uvicorn",
+]
+
+[project.scripts]
+agent-mesh = "agent_mesh.cli:main"
