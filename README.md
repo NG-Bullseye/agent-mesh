@@ -2,6 +2,11 @@
 
 Project-agnostic inter-agent messaging multiplexer via Redis Streams, with an MCP server for Claude Code integration. Any number of agents can send, receive, and ping each other over a shared Redis instance — no direct agent-to-agent connections required.
 
+## One-shot setup on a new machine
+
+Open Claude Code and paste the prompt from **[SETUP_PROMPT.md](SETUP_PROMPT.md)**.
+Claude will install agent-mesh, start Redis, configure the MCP server, and patch your `~/.claude/CLAUDE.md` — no manual steps.
+
 ## Quick start
 
 ```bash
