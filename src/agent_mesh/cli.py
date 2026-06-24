@@ -1,8 +1,11 @@
 import json
+import os
 import sys
 
 import click
+from redis.exceptions import ConnectionError as RedisConnectionError
 
+from . import __version__
 from .core import (
     do_ack,
     do_listen,
@@ -17,12 +20,13 @@ from .registry import deregister, register, who
 
 
 @click.group()
-def main():
+@click.version_option(__version__, "--version", "-V")
+def cli():
     """agent-mesh — inter-agent messaging multiplexer via Redis Streams."""
     pass
 
 
-@main.command("send")
+@cli.command("send")
 @click.argument("target")
 @click.argument("message")
 @click.option("--from", "sender", default="cli", show_default=True, help="Sender name")
@@ -36,16 +40,17 @@ def cmd_send(target, message, sender, private, expect_reply, within):
         sys.exit(1)
 
 
-@main.command("listen")
+@cli.command("listen")
 @click.argument("name")
 @click.option("--stealth", is_flag=True, help="Suppress console output")
-def cmd_listen(name, stealth):
-    """Listen for one event on NAME's streams (blocks up to 60s)."""
-    rc = do_listen(name, stealth)
+@click.option("--timeout", default=60.0, show_default=True, help="Block timeout in seconds")
+def cmd_listen(name, stealth, timeout):
+    """Listen for one event on NAME's streams."""
+    rc = do_listen(name, stealth, timeout_s=timeout)
     sys.exit(rc)
 
 
-@main.command("monitor")
+@cli.command("monitor")
 @click.argument("name")
 @click.option("--stealth", is_flag=True, help="Suppress console output")
 def cmd_monitor(name, stealth):
@@ -53,7 +58,7 @@ def cmd_monitor(name, stealth):
     do_monitor(name, stealth)
 
 
-@main.command("ping")
+@cli.command("ping")
 @click.argument("target")
 @click.option("--from", "sender", default=None, help="Sender name")
 @click.option("--timeout", default=5.0, show_default=True, help="Timeout in seconds")
@@ -67,7 +72,7 @@ def cmd_ping(target, sender, timeout):
         sys.exit(1)
 
 
-@main.command("request")
+@cli.command("request")
 @click.argument("target")
 @click.argument("message")
 @click.option("--from", "sender", required=True, help="Sender name")
@@ -82,7 +87,7 @@ def cmd_request(target, message, sender, timeout):
         sys.exit(1)
 
 
-@main.command("reply")
+@cli.command("reply")
 @click.argument("reply_stream")
 @click.argument("text")
 @click.option("--from", "sender", default=None, help="Sender name")
@@ -91,7 +96,7 @@ def cmd_reply(reply_stream, text, sender):
     do_reply(reply_stream, text, sender=sender)
 
 
-@main.command("ack")
+@cli.command("ack")
 @click.argument("peer")
 @click.argument("text")
 @click.option("--from", "sender", default=None, help="Sender name")
@@ -100,7 +105,7 @@ def cmd_ack(peer, text, sender):
     do_ack(peer, text, sender=sender)
 
 
-@main.command("pending")
+@cli.command("pending")
 @click.argument("name")
 def cmd_pending(name):
     """Show pending reply-expected entries for NAME."""
@@ -112,7 +117,7 @@ def cmd_pending(name):
         click.echo(json.dumps(entry, indent=2))
 
 
-@main.command("register")
+@cli.command("register")
 @click.argument("name")
 @click.option("--role", default="", help="Agent role description")
 def cmd_register(name, role):
@@ -121,7 +126,7 @@ def cmd_register(name, role):
     click.echo(f"registered {name}")
 
 
-@main.command("deregister")
+@cli.command("deregister")
 @click.argument("name")
 def cmd_deregister(name):
     """Remove NAME from the agent registry."""
@@ -129,7 +134,7 @@ def cmd_deregister(name):
     click.echo(f"deregistered {name}")
 
 
-@main.command("who")
+@cli.command("who")
 @click.option("--all", "show_all", is_flag=True, help="Show all fields")
 def cmd_who(show_all):
     """List registered agents."""
@@ -145,7 +150,7 @@ def cmd_who(show_all):
         click.echo(f"{name}  role={role}  pid={pid}  ts={ts}")
 
 
-@main.command("serve")
+@cli.command("serve")
 @click.option("--http", "use_http", is_flag=True, help="Serve via HTTP/SSE instead of stdio")
 @click.option("--port", default=8765, show_default=True, help="HTTP port")
 @click.option("--host", default="0.0.0.0", show_default=True, help="HTTP host")
@@ -153,3 +158,14 @@ def cmd_serve(use_http, port, host):
     """Start the MCP server (stdio by default, --http for SSE)."""
     from .mcp_server import run_server
     run_server(http=use_http, port=port, host=host)
+
+
+def main():
+    """Console-script entry point — wraps the CLI with friendly Redis errors."""
+    try:
+        cli()
+    except RedisConnectionError as e:
+        url = os.environ.get("AGENT_MESH_REDIS_URL", "redis://localhost:6379/0")
+        click.echo(f"agent-mesh: cannot reach Redis at {url} ({e})", err=True)
+        click.echo("Start it with `docker-compose up -d` or set AGENT_MESH_REDIS_URL.", err=True)
+        sys.exit(1)

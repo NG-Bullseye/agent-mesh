@@ -76,7 +76,7 @@ def do_send(
     return True
 
 
-def do_listen(me: str, stealth: bool = False) -> int:
+def do_listen(me: str, stealth: bool = False, timeout_s: float = 60.0) -> int:
     r = get_redis()
     priv_key = private_stream(me)
     grp_key = group_stream()
@@ -87,7 +87,7 @@ def do_listen(me: str, stealth: bool = False) -> int:
     try:
         raw = r.xread(
             {priv_key: priv_cursor, grp_key: grp_cursor},
-            block=60000,
+            block=int(timeout_s * 1000),
             count=50,
         )
     except Exception as e:

@@ -32,8 +32,8 @@ agent-mesh send cortex "private note" --from watchdog --private
 # Send and track reply expectation in pending ledger
 agent-mesh send cortex "please respond" --from watchdog --expect-reply --within 120
 
-# Listen (blocks up to 60s, returns on first DIRECT message)
-agent-mesh listen watchdog
+# Listen (blocks up to --timeout seconds, default 60, returns on first DIRECT message)
+agent-mesh listen watchdog --timeout 30
 
 # Persistent monitor daemon (singleton via flock)
 agent-mesh monitor watchdog
@@ -141,3 +141,7 @@ Every DIRECT message received by `do_listen` is appended to `~/.cache/agent-mesh
 | `AGENT_MESH_PREFIX` | `mesh` | Stream key prefix |
 | `AGENT_MESH_GATE_ENFORCE` | `0` | Set to `1` to hard-deny over-rate sends |
 | `AGENT_MESH_GATE_LIMIT` | `40` | Max sends per sender→target per 10s window |
+
+## License
+
+MIT — see [LICENSE](LICENSE).
