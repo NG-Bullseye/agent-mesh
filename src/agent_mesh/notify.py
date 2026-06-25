@@ -10,4 +10,4 @@ def write_notify(name: str, sender: str, message: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     msg_flat = message.replace("\n", " ").replace("\r", " ")
     with path.open("a") as f:
-        f.write(f"📨 {sender}: {msg_flat}\n")
+        f.write(f"[msg] {sender}: {msg_flat}\n")

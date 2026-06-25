@@ -5,24 +5,13 @@ import time
 import uuid
 from pathlib import Path
 
+from . import store
 from .gate import check as gate_check
 from .notify import write_notify
-from .pending import append_entry, check_overdue, remove_entry
-from .registry import deregister as reg_deregister
-from .registry import register as reg_register
-from .streams import (
-    STREAM_MAXLEN,
-    cursor_path,
-    group_cursor_path,
-    group_stream,
-    load_cursor,
-    pong_stream,
-    private_stream,
-    reply_stream,
-    save_cursor,
-    xread_decode,
-)
-from .transport import get_redis, validate_name
+from .pending import append_entry, check_overdue
+from .validate import validate_name
+
+POLL_INTERVAL = 0.2
 
 
 def do_send(
@@ -41,19 +30,14 @@ def do_send(
         print(f"[gate] DENIED {sender}->{target} (rate={rate})", file=sys.stderr)
         return False
 
-    r = get_redis()
     msg_id = str(uuid.uuid4())
-    fields = {
-        "from": sender,
-        "msg": message,
-        "ts": str(time.time()),
-        "id": msg_id,
-    }
+    store.add_event("direct", from_agent=sender, to_agent=target, kind="msg", body=message)
+
+    if not private:
+        store.add_event("group", from_agent=sender, to_agent=target, kind="msg", body=message)
 
     if expect_reply:
         deadline = time.time() + within
-        fields["expect_reply"] = "1"
-        fields["deadline"] = str(deadline)
         append_entry(sender, {
             "id": msg_id,
             "dir": "out",
@@ -66,73 +50,49 @@ def do_send(
             "escalated": False,
         })
 
-    r.xadd(private_stream(target), fields, maxlen=STREAM_MAXLEN, approximate=True)
-
-    if not private:
-        group_fields = dict(fields)
-        group_fields["to"] = target
-        r.xadd(group_stream(), group_fields, maxlen=STREAM_MAXLEN, approximate=True)
-
     return True
 
 
 def do_listen(me: str, stealth: bool = False, timeout_s: float = 60.0) -> int:
-    r = get_redis()
-    priv_key = private_stream(me)
-    grp_key = group_stream()
+    last = store.get_cursor(me, "listen")
+    deadline = time.time() + timeout_s
 
-    priv_cursor = load_cursor(cursor_path(me))
-    grp_cursor = load_cursor(group_cursor_path(me))
+    while True:
+        rows = store.fetch_for(me, last)
+        for row in rows:
+            last = row["id"]
+            scope = row["scope"]
+            sender = row["from_agent"] or "?"
 
-    try:
-        raw = r.xread(
-            {priv_key: priv_cursor, grp_key: grp_cursor},
-            block=int(timeout_s * 1000),
-            count=50,
-        )
-    except Exception as e:
-        print(f"[listen] xread error: {e}", file=sys.stderr)
-        return 1
-
-    decoded = xread_decode(raw) if raw else []
-
-    for stream_str, messages in decoded:
-        for msg_id, fields in messages:
-            is_private = stream_str == priv_key
-            sender = fields.get("from", "?")
-
-            if is_private:
-                save_cursor(cursor_path(me), msg_id)
-                msg_type = fields.get("msg_type", "")
-                if msg_type == "ping":
-                    nonce = fields.get("nonce", "")
-                    try:
-                        r.xadd(
-                            pong_stream(nonce),
-                            {"from": me, "pong": "1"},
-                            maxlen=STREAM_MAXLEN,
-                            approximate=True,
-                        )
-                    except Exception:
-                        pass
-                    continue
-                # Real direct message
-                msg = fields.get("msg", "")
-                if not stealth:
-                    print(f"[DIRECT from {sender}] {msg}")
-                write_notify(me, sender, msg)
-                return 0  # DIRECT received — caller can act on it
-            else:
-                # Group stream
-                save_cursor(group_cursor_path(me), msg_id)
+            if scope == "group":
                 if sender == me:
-                    continue  # Suppress self-echo
-                msg = fields.get("msg", "")
+                    continue  # suppress self-echo
                 if not stealth:
-                    print(f"[GROUP from {sender}] {msg}")
-                # Keep looping — GROUP is awareness only
+                    print(f"[GROUP from {sender}] {row['body']}")
+                continue  # group is awareness only
 
-    # Timeout or only group messages — do housekeeping
+            # direct
+            if row["kind"] == "ping":
+                store.add_event("pong", from_agent=me, nonce=row["nonce"])
+                continue
+
+            # real direct message
+            store.set_cursor(me, "listen", last)
+            msg = row["body"] or ""
+            reply_to = row["reply_to"]
+            if not stealth:
+                tag = f" | reply-to {reply_to}" if reply_to else ""
+                print(f"[DIRECT from {sender}{tag}] {msg}")
+            write_notify(me, sender, msg)
+            return 0
+
+        store.set_cursor(me, "listen", last)
+
+        if time.time() >= deadline:
+            break
+        time.sleep(POLL_INTERVAL)
+
+    # Timeout — housekeeping
     def _repingfn(peer, text):
         do_send(peer, f"[re-ping] {text}", me, private=True)
 
@@ -140,8 +100,7 @@ def do_listen(me: str, stealth: bool = False, timeout_s: float = 60.0) -> int:
         do_send("watchdog", f"[escalate] no reply from {entry.get('peer')} for: {entry.get('note', '')}", me)
 
     check_overdue(me, _repingfn, _escalate_fn)
-    reg_register(me)
-
+    store.register(me)
     return 0
 
 
@@ -160,14 +119,14 @@ def do_monitor(me: str, stealth: bool = False) -> None:
     lock_file.write(str(os.getpid()))
     lock_file.flush()
 
-    reg_register(me)
+    store.register(me)
 
     while True:
         try:
             do_listen(me, stealth)
         except Exception as e:
             print(f"[monitor] listen error: {e}", file=sys.stderr)
-        reg_register(me)
+        store.register(me)
         time.sleep(0.1)
 
 
@@ -176,30 +135,16 @@ def do_ping(
     timeout_s: float = 5.0,
     sender: str | None = None,
 ) -> tuple[bool, int]:
-    r = get_redis()
     nonce = uuid.uuid4().hex
     sender = sender or "ping"
-    r.xadd(
-        private_stream(target),
-        {
-            "from": sender,
-            "msg_type": "ping",
-            "nonce": nonce,
-            "ts": str(time.time()),
-        },
-        maxlen=STREAM_MAXLEN,
-        approximate=True,
-    )
-    t0 = time.time()
-    pong_key = pong_stream(nonce)
-    try:
-        raw = r.xread({pong_key: "0"}, block=int(timeout_s * 1000), count=1)
-    except Exception:
-        return (False, -1)
+    store.add_event("direct", from_agent=sender, to_agent=target, kind="ping", nonce=nonce)
 
-    if raw:
-        ms = int((time.time() - t0) * 1000)
-        return (True, ms)
+    t0 = time.time()
+    deadline = t0 + timeout_s
+    while time.time() < deadline:
+        if store.fetch_rendezvous("pong", nonce):
+            return (True, int((time.time() - t0) * 1000))
+        time.sleep(POLL_INTERVAL)
     return (False, -1)
 
 
@@ -209,54 +154,29 @@ def do_request(
     sender: str,
     timeout_s: float = 180.0,
 ) -> str | None:
-    r = get_redis()
     nonce = uuid.uuid4().hex
-    reply_key = reply_stream(nonce)
-    r.xadd(
-        private_stream(target),
-        {
-            "from": sender,
-            "msg": message,
-            "reply_to": reply_key,
-            "ts": str(time.time()),
-            "id": nonce,
-        },
-        maxlen=STREAM_MAXLEN,
-        approximate=True,
+    store.add_event(
+        "direct", from_agent=sender, to_agent=target, kind="msg",
+        nonce=nonce, reply_to=nonce, body=message,
     )
-    try:
-        raw = r.xread({reply_key: "0"}, block=int(timeout_s * 1000), count=1)
-    except Exception:
-        return None
 
-    if raw:
-        decoded = xread_decode(raw)
-        for _stream, messages in decoded:
-            for _msg_id, fields in messages:
-                if "reply" in fields:
-                    return fields["reply"]
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        row = store.fetch_rendezvous("reply", nonce)
+        if row:
+            return row["body"]
+        time.sleep(POLL_INTERVAL)
     return None
 
 
-def do_reply(reply_stream_name: str, text: str, sender: str | None = None) -> bool:
-    r = get_redis()
+def do_reply(reply_nonce: str, text: str, sender: str | None = None) -> bool:
     sender = sender or "unknown"
-    r.xadd(
-        reply_stream_name,
-        {
-            "from": sender,
-            "reply": text,
-            "ts": str(time.time()),
-        },
-        maxlen=STREAM_MAXLEN,
-        approximate=True,
-    )
+    store.add_event("reply", from_agent=sender, nonce=reply_nonce, body=text)
     return True
 
 
 def do_ack(peer: str, text: str, sender: str | None = None) -> bool:
     sender = sender or "unknown"
-    # Remove any pending entries for this peer from our ledger
     from .pending import load, save_all
     entries = load(sender)
     filtered = [e for e in entries if e.get("peer") != peer]

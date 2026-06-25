@@ -1,16 +1,12 @@
-import asyncio
 import json
-import time
 
-import mcp.types as types
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 
-from .core import do_ping, do_reply, do_request, do_send
+from . import store
+from .core import do_ping, do_request, do_send
 from .pending import load as load_pending
 from .registry import register, who
-from .streams import private_stream, xread_decode, STREAM_MAXLEN
-from .transport import get_redis
 
 app = Server("agent-mesh")
 
@@ -135,23 +131,27 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return _json({"ok": True})
 
     elif name == "mesh_listen_once":
+        import time
         agent_name = arguments["name"]
         timeout_s = arguments.get("timeout_s", 5.0)
-        r = get_redis()
-        stream_key = private_stream(agent_name)
-        try:
-            raw = r.xread(
-                {stream_key: "$"},
-                block=int(timeout_s * 1000),
-                count=1,
-            )
-        except Exception:
-            return _json({"message": None})
-        if raw:
-            decoded = xread_decode(raw)
-            for _stream, messages in decoded:
-                for msg_id, fields in messages:
-                    return _json({"message": {"id": msg_id, **fields}})
+        last = store.get_cursor(agent_name, "listen")
+        deadline = time.time() + timeout_s
+        while True:
+            rows = store.fetch_for(agent_name, last)
+            for row in rows:
+                last = row["id"]
+                store.set_cursor(agent_name, "listen", last)
+                if row["scope"] == "direct" and row["kind"] == "msg":
+                    return _json({"message": {
+                        "id": row["id"],
+                        "from": row["from_agent"],
+                        "msg": row["body"],
+                        "reply_to": row["reply_to"],
+                    }})
+            store.set_cursor(agent_name, "listen", last)
+            if time.time() >= deadline:
+                break
+            time.sleep(0.2)
         return _json({"message": None})
 
     elif name == "mesh_request":

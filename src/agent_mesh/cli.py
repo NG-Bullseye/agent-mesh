@@ -1,11 +1,11 @@
 import json
-import os
+import sqlite3
 import sys
 
 import click
-from redis.exceptions import ConnectionError as RedisConnectionError
 
 from . import __version__
+from . import store
 from .core import (
     do_ack,
     do_listen,
@@ -161,11 +161,9 @@ def cmd_serve(use_http, port, host):
 
 
 def main():
-    """Console-script entry point — wraps the CLI with friendly Redis errors."""
+    """Console-script entry point — wraps the CLI with a friendly store error."""
     try:
         cli()
-    except RedisConnectionError as e:
-        url = os.environ.get("AGENT_MESH_REDIS_URL", "redis://localhost:6379/0")
-        click.echo(f"agent-mesh: cannot reach Redis at {url} ({e})", err=True)
-        click.echo("Start it with `docker-compose up -d` or set AGENT_MESH_REDIS_URL.", err=True)
+    except sqlite3.Error as e:
+        click.echo(f"agent-mesh: store error at {store.db_path()} ({e})", err=True)
         sys.exit(1)
