@@ -1,0 +1,14 @@
+services:
+  agent-mesh:
+    build: .
+    image: agent-mesh-hub
+    container_name: agent-mesh-hub
+    # Bind to localhost only — the hub is reachable from this machine, not the network.
+    ports:
+      - "127.0.0.1:8765:8765"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8765/health',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

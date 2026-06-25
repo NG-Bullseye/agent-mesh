@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-mesh"
-version = "0.2.0"
-description = "Zero-dependency inter-agent messaging MCP server (embedded SQLite, no external services)"
+version = "0.3.0"
+description = "Central event-driven inter-agent messaging hub, exposed as an MCP server. Runs in Docker; agents connect by URL with no install."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [{ name = "Leonard Wecke" }]
-keywords = ["mcp", "claude", "agents", "messaging", "multiplexer", "sqlite"]
+keywords = ["mcp", "claude", "agents", "messaging", "hub", "docker"]
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -19,10 +19,9 @@ classifiers = [
 dependencies = [
     "click>=8.0",
     "mcp>=1.0",
+    "starlette",
+    "uvicorn",
 ]
-
-[project.optional-dependencies]
-http = ["starlette", "uvicorn"]
 
 [project.urls]
 Homepage = "https://github.com/NG-Bullseye/agent-mesh"

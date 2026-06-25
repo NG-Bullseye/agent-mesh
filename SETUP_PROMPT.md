@@ -1,8 +1,8 @@
 # Agent-Mesh Setup Prompt
 
 Paste the block below as your first message to Claude Code on the target machine.
-Claude installs agent-mesh, registers the MCP server, and patches your global CLAUDE.md.
-There is no service to install or start — state lives in a local SQLite file.
+Claude starts the hub container (once per host) and connects this Claude instance
+to it. Connecting agents install nothing — they only get an MCP URL.
 
 ---
 
@@ -10,114 +10,96 @@ There is no service to install or start — state lives in a local SQLite file.
 
 ---
 
-Set up the `agent-mesh` inter-agent messaging MCP server on this machine. Work through all steps autonomously, verify each one, and report what you did.
+Set up the `agent-mesh` hub on this machine and connect this Claude instance to it. Work through all steps autonomously, verify each one, and report what you did.
 
-### 1 — Install
+### 1 — Start the hub (skip if already running)
+
+Check whether the hub already answers:
 
 ```bash
-pip install git+https://github.com/NG-Bullseye/agent-mesh.git
+curl -s http://localhost:8765/health
 ```
 
-Verify: `agent-mesh --version` prints a version and exits 0.
+If that returns `{"ok": true, ...}`, the hub is up — go to step 2.
 
-There is no broker, database server, or container to set up. agent-mesh stores
-its state in a local SQLite file at `~/.cache/agent-mesh/mesh.db`, created on
-first use.
+Otherwise start it via Docker (the hub runs in a container; nothing is installed on the host):
 
-### 2 — MCP server configuration
+```bash
+git clone https://github.com/NG-Bullseye/agent-mesh.git ~/agent-mesh-hub 2>/dev/null || git -C ~/agent-mesh-hub pull
+cd ~/agent-mesh-hub
+docker compose up -d --build
+```
 
-Add `agent-mesh` to the user-level Claude Code MCP config at `~/.claude/settings.json`. Read the file first (create it as `{}` if missing), then merge in the `agent-mesh` entry under `mcpServers`:
+Wait until `curl -s http://localhost:8765/health` returns `{"ok": true, ...}`.
+The container binds to `127.0.0.1:8765` (this machine only).
+
+If Docker is unavailable, run the hub directly instead:
+
+```bash
+pip install ~/agent-mesh-hub
+nohup agent-mesh serve --http --port 8765 >/tmp/agent-mesh.log 2>&1 &
+```
+
+### 2 — Connect this Claude instance (no install)
+
+Add `agent-mesh` to the user-level MCP config at `~/.claude/settings.json`. Read the file first (create it as `{}` if missing), then merge in this entry under `mcpServers`, preserving all existing keys:
 
 ```json
 {
   "mcpServers": {
-    "agent-mesh": {
-      "command": "agent-mesh",
-      "args": ["serve"]
-    }
+    "agent-mesh": { "url": "http://localhost:8765/sse" }
   }
 }
 ```
 
-No env vars are required. If you want a non-default database location, add
-`"env": { "AGENT_MESH_DB": "/path/to/mesh.db" }`.
-
-Preserve all existing keys in `settings.json` — only add/replace the `agent-mesh` entry under `mcpServers`.
+The connecting agent installs nothing — it only points at the hub URL.
 
 ### 3 — Patch ~/.claude/CLAUDE.md
 
-Read `~/.claude/CLAUDE.md`. If the file does not exist, create it with only the section below. If it exists, check whether a `## Agent Mesh` section is already present — if yes, replace it; if no, append it at the end.
-
-Insert/replace this section verbatim:
+Read `~/.claude/CLAUDE.md`. If it does not exist, create it with only the section below. If it exists, replace an existing `## Agent Mesh` section or append this one:
 
 ```markdown
 ## Agent Mesh
 
-`agent-mesh` is a zero-dependency inter-agent messaging MCP server backed by a
-local SQLite file (no Redis, no Docker, nothing to run). The MCP server exposes
-7 tools for messaging, discovery, and liveness. Source + full docs:
-https://github.com/NG-Bullseye/agent-mesh
+`agent-mesh` is a central event-driven messaging hub for agents, reached as an
+MCP server at http://localhost:8765/sse. The hub runs in Docker; this instance
+connects by URL only. Source: https://github.com/NG-Bullseye/agent-mesh
 
-### MCP tools (available after MCP server starts)
+### MCP tools
 
 | Tool | What it does |
 |------|-------------|
-| `mesh_send` | Send a message to an agent (`to`, `message`, `from_agent`, optional `private`) |
-| `mesh_ping` | Liveness check — returns ok + latency_ms |
-| `mesh_who` | List all live agents (registry) |
-| `mesh_register` | Register this instance by name + role |
-| `mesh_listen_once` | Poll the inbox once (`timeout_s`) |
-| `mesh_request` | Send a request, block for reply (`timeout_s=60`) |
-| `mesh_pending` | Show open reply-expected entries for a name |
+| `mesh_register` | Connect this instance to the hub (`name`, `role`) |
+| `mesh_send` | Send a message (`to`, `message`, `from_agent`, optional `private`) |
+| `mesh_listen` | Block until one DIRECT message arrives (`name`, `timeout_s`) — event-driven |
+| `mesh_ping` | Liveness check for an agent |
+| `mesh_who` | List all live agents |
+| `mesh_request` | Send a request, block for the reply |
+| `mesh_reply` | Reply to a request (`nonce`, `text`) |
+| `mesh_pending` | List outstanding requests for a name |
 
 ### Session-Init pattern
 
-At the start of any session that wants to participate in the mesh:
-
-1. Call `mesh_register` with a name and role description.
-2. Optionally arm a `Monitor` tool on `~/.cache/agent-mesh/notify-<name>.log`
-   with `persistent=true` — this wakes the session when a DIRECT message arrives.
-
-### CLI quick reference
-
-```bash
-agent-mesh send <target> "<msg>" --from <me>
-agent-mesh listen <name> --timeout 60   # block until one DIRECT message arrives
-agent-mesh monitor <name>               # persistent singleton daemon
-agent-mesh ping <target> --from <me>
-agent-mesh request <target> "<msg>" --from <me>
-agent-mesh who
-```
-
-### Config
-
-| Env var | Default | Purpose |
-|---------|---------|---------|
-| `AGENT_MESH_DB` | `~/.cache/agent-mesh/mesh.db` | SQLite database path |
-| `AGENT_MESH_GATE_ENFORCE` | `0` | `1` = hard-deny over-rate sends |
+1. Call `mesh_register` with a name and role.
+2. To receive, call `mesh_listen` — it blocks until a message arrives (no polling).
 ```
 
 ### 4 — Smoke test
 
-Run the following and report results:
+After the MCP server is connected (you may need the MCP tools to appear), verify the hub:
 
 ```bash
-# Register this machine as a mesh participant
-agent-mesh register "$(hostname)" --role "agent-mesh test node"
-
-# List live agents (should show the just-registered name)
-agent-mesh who
-
-# Self-send + receive
-agent-mesh send "$(hostname)" "smoke-test" --from "$(hostname)"
-agent-mesh listen "$(hostname)" --timeout 3
+curl -s http://localhost:8765/health
+curl -s http://localhost:8765/agents
 ```
 
+Then, using the MCP tools: `mesh_register` this instance, `mesh_who`, and report.
+
 Report:
-- `agent-mesh` binary path + version (`agent-mesh --version`)
-- SQLite database path (`~/.cache/agent-mesh/mesh.db` unless overridden)
-- `settings.json` path + whether agent-mesh entry was added fresh or merged
-- `~/.claude/CLAUDE.md`: created fresh / section appended / section replaced
-- `agent-mesh who` output
+- hub: container running / direct process / already up
+- `/health` output
+- `settings.json` path + whether the agent-mesh entry was added fresh or merged
+- `~/.claude/CLAUDE.md`: created / section appended / section replaced
+- `mesh_who` result
 
 ---

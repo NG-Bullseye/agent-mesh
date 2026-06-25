@@ -1,83 +1,46 @@
 # agent-mesh
 
-A zero-dependency MCP server that lets multiple agents on one machine send, receive, and ping each other. State lives in a single local SQLite file — no Redis, no Docker, no broker, nothing to run. Install it, point your MCP client at it, done.
+A central, event-driven messaging hub for AI agents, exposed as an MCP server.
 
-Any number of agents (Claude Code instances, scripts, daemons) share one `mesh.db` and message each other through it.
+One small Docker container runs the hub. Every agent (Claude Code instance,
+script, daemon) connects to it over MCP by **URL only — no install, no local
+process**. Messages are pushed the instant they arrive: an agent that waits for
+a message holds one open call that resolves on delivery, like a socket read.
+No polling.
 
-## One-shot setup
+```
+            +-----------------------------+
+            |  Docker container (hub)      |
+            |  agent-mesh serve --http     |
+            |  MCP over HTTP/SSE  :8765    |
+            |  per-agent inbox queue       |
+            |  push on arrival (no poll)   |
+            +-------------+---------------+
+            127.0.0.1:8765 |  (localhost only)
+        +------------------+------------------+
+     Claude #1          Claude #2          script/daemon
+   (MCP url config)   (MCP url config)   (MCP url config)
+```
 
-Open Claude Code and paste the prompt from **[SETUP_PROMPT.md](SETUP_PROMPT.md)**.
-Claude installs agent-mesh and registers the MCP server. There is no service to start.
+## Setup
 
-## Quick start
+The host machine runs the hub once; agents just point at it.
+
+### 1 - Run the hub (one machine)
 
 ```bash
-pip install git+https://github.com/NG-Bullseye/agent-mesh.git
-agent-mesh who
+git clone https://github.com/NG-Bullseye/agent-mesh.git
+cd agent-mesh
+docker compose up -d --build
+curl -s http://localhost:8765/health   # {"ok": true, "agents": 0}
 ```
 
-That's the whole setup. The SQLite file is created on first use at
-`~/.cache/agent-mesh/mesh.db` (override with `AGENT_MESH_DB`).
+The container binds to `127.0.0.1:8765` - reachable from this machine only.
 
-## CLI usage
+### 2 - Connect an agent (no install)
 
-```bash
-# Send a message (lands in target's inbox + the group broadcast)
-agent-mesh send cortex "hello from watchdog" --from watchdog
-
-# Send privately (inbox only, no group echo)
-agent-mesh send cortex "private note" --from watchdog --private
-
-# Send and track a reply expectation in the pending ledger
-agent-mesh send cortex "please respond" --from watchdog --expect-reply --within 120
-
-# Listen (blocks up to --timeout seconds, default 60, returns on first DIRECT message)
-agent-mesh listen watchdog --timeout 30
-
-# Persistent monitor daemon (singleton via flock)
-agent-mesh monitor watchdog
-
-# Ping
-agent-mesh ping cortex --from watchdog
-
-# Request/reply roundtrip
-agent-mesh request cortex "what time is it?" --from watchdog
-# (on cortex side) agent-mesh reply <nonce> "it is noon" --from cortex
-#   the <nonce> is shown in the listener output as "reply-to <nonce>"
-
-# Registry
-agent-mesh register cortex --role "main implementer"
-agent-mesh who
-
-# Pending ledger
-agent-mesh pending watchdog
-```
-
-## MCP server setup
-
-### stdio mode (default — recommended for Claude Code)
-
-Add to your Claude Code MCP config (e.g. `~/.claude/settings.json`):
-
-```json
-{
-  "mcpServers": {
-    "agent-mesh": {
-      "command": "agent-mesh",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-No env vars required. Set `AGENT_MESH_DB` if you want a non-default database path.
-
-### HTTP/SSE mode
-
-```bash
-pip install "agent-mesh[http]"   # pulls starlette + uvicorn
-agent-mesh serve --http --port 8765
-```
+Add to the Claude Code MCP config (`~/.claude/settings.json`); merge under
+`mcpServers`, keep existing keys:
 
 ```json
 {
@@ -87,76 +50,77 @@ agent-mesh serve --http --port 8765
 }
 ```
 
-### Available MCP tools
+That's it. The agent now has the mesh tools. For a fully scripted setup
+(including the global CLAUDE.md note), paste **[SETUP_PROMPT.md](SETUP_PROMPT.md)**
+into a Claude Code session.
+
+## MCP tools
 
 | Tool | Description |
 |------|-------------|
-| `mesh_send` | Send a message to an agent |
-| `mesh_ping` | Ping an agent and measure latency |
-| `mesh_who` | List all registered agents |
-| `mesh_register` | Register an agent in the registry |
-| `mesh_listen_once` | Wait for one message on an inbox |
-| `mesh_request` | Send a request and wait for a reply |
-| `mesh_pending` | List pending reply-expected entries |
+| `mesh_register` | Connect this agent to the hub (`name`, `role`) |
+| `mesh_send` | Send a message (`to`, `message`, `from_agent`, optional `private`) - delivered instantly if the target is listening |
+| `mesh_listen` | Block until one DIRECT message arrives (`name`, `timeout_s`) - event-driven, no polling |
+| `mesh_ping` | Liveness check for an agent (`agent`) |
+| `mesh_who` | List all live agents |
+| `mesh_request` | Send a request and block for the reply (`to`, `message`, `from_agent`, `timeout_s`) |
+| `mesh_reply` | Reply to a request (`nonce`, `text`) - resolves the requester's pending call |
+| `mesh_pending` | List an agent's outstanding requests (`name`) |
 
-## Architecture
+### Session-Init pattern
 
-Everything is one SQLite database (WAL mode for concurrent processes). No network services.
+At the start of a session that joins the mesh:
 
-### Event model
+1. `mesh_register` with a name + role.
+2. To receive messages, call `mesh_listen` - it blocks until something arrives,
+   so the agent reacts on delivery instead of polling.
 
-A single append-only `events` table carries every message. Each row has a `scope`:
+### Request/reply
 
-```
-direct  — addressed to one agent's inbox
-group   — broadcast; every agent sees it
-pong    — ping/pong rendezvous (matched by nonce)
-reply   — request/reply rendezvous (matched by nonce)
-audit   — rate-gate decisions
-```
+`mesh_request` sends and blocks on a reply Future. The receiving agent sees the
+message via `mesh_listen` with a `reply_to` nonce, then calls `mesh_reply` with
+that nonce - the requester's call resolves immediately.
 
-A listener reads new rows where `scope='direct' AND to_agent=me`, plus all
-`group` rows, ordered by the autoincrement id it last saw (its cursor). The
-event table is trimmed to the most recent ~5000 rows on write.
+## How it works
 
-Blocking reads are emulated by short polling (~200 ms), so `ping`/`listen`
-latency is on that order rather than the sub-millisecond of a push broker —
-the tradeoff for needing no broker at all.
+The hub is a single asyncio process. Each registered agent has an in-memory
+`asyncio.Queue` as its inbox. `mesh_send` drops an item into the target's queue;
+a waiting `mesh_listen` is parked on `queue.get()` and wakes the moment the item
+lands. There is no broker, no database, no polling loop - state lives in the hub
+process for as long as it runs.
 
-### Registry
+Group broadcasts (non-private sends) are fanned out to every other agent's inbox
+as `scope: "group"` items. A fixed-window rate gate limits direct sends per
+sender->target; over-limit sends are denied only when `AGENT_MESH_GATE_ENFORCE=1`.
 
-`agent-mesh register <name>` upserts a row with a 180s expiry; the monitor
-daemon renews it on each idle iteration. `agent-mesh who` lists rows that
-haven't expired.
+State is intentionally ephemeral: restarting the container clears inboxes and the
+registry, like restarting a switch. This keeps the hub a single, dependency-free
+artifact. Scope is one host (localhost bind); a networked multi-machine mesh
+would add auth and is out of scope here.
 
-### Rate gate
+## Endpoints
 
-A fixed-window counter limits direct sends to `AGENT_MESH_GATE_LIMIT` per 10s
-window per sender→target. In observe mode (default) over-limit sends are still
-delivered but logged to `audit`. Set `AGENT_MESH_GATE_ENFORCE=1` to hard-deny.
-
-### Notify log + harness monitor integration
-
-Every DIRECT message received by `listen` is appended to
-`~/.cache/agent-mesh/notify-<name>.log`. The Claude Code `Monitor` tool can
-watch that file as a waker, so an agent wakes on incoming messages without
-polling from the model side.
-
-### Pending ledger
-
-`--expect-reply` sends append to `~/.cache/agent-mesh/pending-<sender>.jsonl`.
-The monitor loop checks overdue entries each idle iteration: overdue ones
-trigger exponential re-pings (30/60/120/240s) and escalation to `watchdog`
-after 4 tries.
+| Path | Purpose |
+|------|---------|
+| `/sse` | MCP transport (point agents here) |
+| `/health` | `{"ok": true, "agents": N}` |
+| `/agents` | JSON list of live agents |
 
 ## Config env vars
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENT_MESH_DB` | `~/.cache/agent-mesh/mesh.db` | SQLite database path |
 | `AGENT_MESH_GATE_ENFORCE` | `0` | Set to `1` to hard-deny over-rate sends |
-| `AGENT_MESH_GATE_LIMIT` | `40` | Max direct sends per sender→target per 10s window |
+| `AGENT_MESH_GATE_LIMIT` | `40` | Max direct sends per sender->target per 10s window |
+
+## Running without Docker
+
+```bash
+pip install .
+agent-mesh serve --http --port 8765   # or `serve` for stdio
+agent-mesh health                      # check a running hub
+```
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).
