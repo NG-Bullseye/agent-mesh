@@ -60,13 +60,18 @@ The container binds to `127.0.0.1:8765` — reachable from this machine only.
 
 ### 2 — Connect an agent (no install)
 
-Add to the Claude Code MCP config (`~/.claude/settings.json`); merge under
-`mcpServers`, keep existing keys:
+Register the hub with Claude Code (user scope — available in every project):
+
+```bash
+claude mcp add --transport sse --scope user agent-mesh http://localhost:8765/sse
+```
+
+Or per project via a `.mcp.json` in the repo root:
 
 ```json
 {
   "mcpServers": {
-    "agent-mesh": { "url": "http://localhost:8765/sse" }
+    "agent-mesh": { "type": "sse", "url": "http://localhost:8765/sse" }
   }
 }
 ```

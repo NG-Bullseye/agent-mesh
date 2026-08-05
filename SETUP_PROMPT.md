@@ -42,14 +42,11 @@ nohup agent-mesh serve --http --port 8765 >/tmp/agent-mesh.log 2>&1 &
 
 ### 2 — Connect this Claude instance (no install)
 
-Add `agent-mesh` to the user-level MCP config at `~/.claude/settings.json`. Read the file first (create it as `{}` if missing), then merge in this entry under `mcpServers`, preserving all existing keys:
+Register the hub at user scope (NOT in `settings.json` — Claude Code does not
+read MCP servers from there):
 
-```json
-{
-  "mcpServers": {
-    "agent-mesh": { "url": "http://localhost:8765/sse" }
-  }
-}
+```bash
+claude mcp add --transport sse --scope user agent-mesh http://localhost:8765/sse
 ```
 
 The connecting agent installs nothing — it only points at the hub URL.
@@ -98,7 +95,7 @@ Then, using the MCP tools: `mesh_register` this instance, `mesh_who`, and report
 Report:
 - hub: container running / direct process / already up
 - `/health` output
-- `settings.json` path + whether the agent-mesh entry was added fresh or merged
+- `claude mcp list` line for agent-mesh (must show Connected)
 - `~/.claude/CLAUDE.md`: created / section appended / section replaced
 - `mesh_who` result
 
