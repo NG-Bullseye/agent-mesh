@@ -173,6 +173,8 @@ would add auth and is out of scope here.
 
 ## Running without Docker
 
+Setup in einem Schritt (idempotent, startet keinen Dienst): `bash bootstrap.sh`
+
 ```bash
 pip install .
 agent-mesh serve --http --port 8765   # or `serve` for stdio
